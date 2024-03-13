@@ -169,7 +169,7 @@ class OpenClipper(torch.nn.Module):
         return clip_emb
     
 class BrainNetwork(nn.Module):
-    def __init__(self, out_dim=768, in_dim=15724, clip_size=768, h=4096, n_blocks=4, norm_type='ln', act_first=False, use_projector=True):
+    def __init__(self, out_dim=10, in_dim=15724, clip_size=768, h=4096, n_blocks=4, norm_type='ln', act_first=False, use_projector=False):
         super().__init__()
         norm_func = partial(nn.BatchNorm1d, num_features=h) if norm_type == 'bn' else partial(nn.LayerNorm, normalized_shape=h)
         act_fn = partial(nn.ReLU, inplace=True) if norm_type == 'bn' else nn.GELU

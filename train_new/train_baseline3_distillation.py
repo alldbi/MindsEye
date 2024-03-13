@@ -10,6 +10,7 @@ from torchvision import transforms
 from PIL import Image
 import matplotlib.pyplot as plt
 from models import BrainNetwork
+from resnet import ResNet18
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -21,7 +22,7 @@ wandb.login(key='72d705540a593a2db4441a16e7bb72f3b6512a09')
 # start a new wandb run to track this script
 wandb.init(
     # set the wandb project where this run will be logged
-    project="baseline2",
+    project="EON-baseline3-distillation",
 
     # track hyperparameters and run metadata
     config={
@@ -121,10 +122,24 @@ class DatasetfMRI(Dataset):
         return image, voxels, coco, lbl
 
 
-def train(epoch, net, optimizer, trainloader, device):
-    net.train()
+class DistillKL(nn.Module):
+    """Distilling the Knowledge in a Neural Network"""
+    def __init__(self, T=4):
+        super(DistillKL, self).__init__()
+        self.T = T
+
+    def forward(self, y_s, y_t):
+        p_s = F.log_softmax(y_s/self.T, dim=1)
+        p_t = F.softmax(y_t/self.T, dim=1)
+        loss = F.kl_div(p_s, p_t, size_average=False) * (self.T**2) / y_s.shape[0]
+        return loss
+
+def train(epoch, net_t, net_s, optimizer, trainloader, device):
+    net_t.eval()
+    net_s.train()
 
     am_loss1 = utils.AverageMeter()
+    am_loss2 = utils.AverageMeter()
     am_acc = utils.AverageMeter()
 
     prog_bar = tqdm(
@@ -133,9 +148,10 @@ def train(epoch, net, optimizer, trainloader, device):
         bar_format="{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} | {rate_fmt}{postfix}"
     )
 
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion_xent = torch.nn.CrossEntropyLoss()
+    criterion_kd = DistillKL()
     for batch_idx, data in enumerate(prog_bar):
-        voxels, target = data[1], data[3]
+        images, voxels, target = data[0], data[1], data[3]
 
         repeat_index = batch_idx % 3
 
@@ -146,35 +162,84 @@ def train(epoch, net, optimizer, trainloader, device):
 
         bs = len(voxels)
 
-        voxels, target = voxels.to(device), target.to(device)
+        images, voxels, target = images.to(device), voxels.to(device), target.to(device)
 
         optimizer.zero_grad()
 
-        pred = net(voxels)
+        pred_t = net_t(voxels)
+        pred_s = net_s(images)
 
-        loss = criterion(pred, target)
+
+
+        loss_xent = criterion_xent(pred_s, target)
+        loss_kd = criterion_kd(pred_s, pred_t.detach())
+
+        alpha = 0.1
+        loss = alpha * loss_xent + (1-alpha) * loss_kd
 
         loss.backward()
 
         optimizer.step()
 
-        pred_lbl = pred.argmax(1)
+        pred_lbl = pred_s.argmax(1)
 
         acc = (pred_lbl == target).type(torch.float).mean()
 
-        am_loss1.update(loss.mean().item())
+        am_loss1.update(loss_xent.mean().item())
+        am_loss2.update(loss_kd.mean().item())
         am_acc.update(acc.item() * 100)
         # am_loss2.update(loss_dense.mean().item())
 
         prog_bar.set_description(
-            "Train: E{}, loss:{:2.3f}, acc:{:2.3f}".format(
-                epoch, am_loss1.avg, am_acc.avg))
+            "Train: E{}, loss_xend:{:2.3f}, loss_kd:{:2.3f}, acc:{:2.3f}".format(
+                epoch, am_loss1.avg, am_loss2.avg, am_acc.avg))
+    prog_bar.close()
+
+    return am_loss1.avg, am_loss2.avg, am_acc.avg
+
+def eval(epoch, net, valloader, device):
+    net.eval()
+
+    am_loss1 = utils.AverageMeter()
+    am_acc = utils.AverageMeter()
+
+    prog_bar = tqdm(
+        valloader,
+        ascii=True,
+        bar_format="{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} | {rate_fmt}{postfix}"
+    )
+
+    criterion = torch.nn.CrossEntropyLoss()
+    for batch_idx, data in enumerate(prog_bar):
+        images, target = data[0], data[3]
+
+        target = target.type(torch.LongTensor)
+
+        bs = len(images)
+
+        with torch.no_grad():
+            images, target = images.to(device), target.to(device)
+
+            pred = net(images)
+
+            loss = criterion(pred, target)
+
+            pred_lbl = pred.argmax(1)
+
+            acc = (pred_lbl == target).type(torch.float).mean()
+
+            am_loss1.update(loss.mean().item())
+            am_acc.update(acc.item() * 100)
+            # am_loss2.update(loss_dense.mean().item())
+
+            prog_bar.set_description(
+                "Test: E{}, loss:{:2.3f}, acc:{:2.3f}".format(
+                    epoch, am_loss1.avg, am_acc.avg))
     prog_bar.close()
 
     return am_loss1.avg, am_acc.avg
 
-
-def eval(epoch, net, valloader, device):
+def eval_t(epoch, net, valloader, device):
     net.eval()
 
     am_loss1 = utils.AverageMeter()
@@ -248,17 +313,31 @@ batch_size = 256
 train_dl = torch.utils.data.DataLoader(train_set, batch_size=batch_size, num_workers=8, shuffle=True)
 val_dl = torch.utils.data.DataLoader(val_set, batch_size=batch_size, num_workers=8, shuffle=False)
 
-net = BrainNetwork()
+
+net_t = BrainNetwork()
+net_s = ResNet18(num_classes=10)
 device = 'cuda:0'
 
-net = net.to(device)
+net_t = net_t.to(device)
+net_s = net_s.to(device)
 
-lr =  0.1
+
+teacher_checkpoint = ''
+state = torch.load('/fsx/proj-medarc/fmri/natural-scenes-dataset/log/baseline2_best.pt')
+net_t.load_state_dict(state['net'])
+net_t.eval()
+
+_, val_acc = eval_t(0, net_t, val_dl, device)
+print('teachers acc: %.2f' % val_acc)
+
+
+
+lr =  0.2
 criterion = nn.CrossEntropyLoss()
 
 print(lr)
 
-optimizer = optim.SGD(net.parameters(), lr=lr,
+optimizer = optim.SGD(net_s.parameters(), lr=lr,
                       momentum=0.9, weight_decay=5e-4)
 
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
@@ -269,18 +348,20 @@ best_loss = 0
 
 
 for e in range(200):
-    train_loss, train_acc = train(e, net, optimizer, train_dl, device)
-    val_loss, val_acc = eval(e, net, val_dl, device)
+    train_loss_xent, train_loss_kd, train_acc = train(e, net_t, net_s, optimizer, train_dl, device)
+    val_loss, val_acc = eval(e, net_s, val_dl, device)
 
     if val_acc > best_acc:
         best_acc = val_acc
-        state = {'net': net.state_dict()}
+        state = {'net_s': net_s.state_dict()}
         print('save checkpoint: best acc: %.2f'% best_acc)
-        torch.save(state, os.path.join('/fsx/proj-medarc/fmri/natural-scenes-dataset/log', 'baseline2_best.pt'))
+        torch.save(state, os.path.join('/fsx/proj-medarc/fmri/natural-scenes-dataset/log', 'baseline3_best.pt'))
 
-    wandb.log({"train_acc": train_acc, "train_loss": train_loss, "val_acc":val_acc, "val_loss": val_loss, "lr":optimizer.param_groups[0]['lr']})
+    wandb.log({"train_acc": train_acc, "train_loss_xent": train_loss_xent, "train_loss_kd" : train_loss_kd, "val_acc":val_acc, "val_loss": val_loss,"best_acc":best_acc,   "lr":optimizer.param_groups[0]['lr']})
     scheduler.step()
 
 wandb.finish()
 
 # 77.73
+
+# 73.85

@@ -9,7 +9,7 @@ from skimage import io, transform
 from torchvision import transforms
 from PIL import Image
 import matplotlib.pyplot as plt
-from resnet import ResNet18
+from models import BrainNetwork
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -21,7 +21,7 @@ wandb.login(key='72d705540a593a2db4441a16e7bb72f3b6512a09')
 # start a new wandb run to track this script
 wandb.init(
     # set the wandb project where this run will be logged
-    project="baseline1",
+    project="baseline2",
 
     # track hyperparameters and run metadata
     config={
@@ -135,17 +135,22 @@ def train(epoch, net, optimizer, trainloader, device):
 
     criterion = torch.nn.CrossEntropyLoss()
     for batch_idx, data in enumerate(prog_bar):
-        img, target = data[0], data[3]
+        voxels, target = data[1], data[3]
+
+        repeat_index = batch_idx % 3
+
+        voxels = voxels[:, repeat_index].float()
+
 
         target = target.type(torch.LongTensor)
 
-        bs = len(img)
+        bs = len(voxels)
 
-        img, target = img.to(device), target.to(device)
+        voxels, target = voxels.to(device), target.to(device)
 
         optimizer.zero_grad()
 
-        pred = net(img)
+        pred = net(voxels)
 
         loss = criterion(pred, target)
 
@@ -183,16 +188,18 @@ def eval(epoch, net, valloader, device):
 
     criterion = torch.nn.CrossEntropyLoss()
     for batch_idx, data in enumerate(prog_bar):
-        img, target = data[0], data[3]
+        voxels, target = data[1], data[3]
 
         target = target.type(torch.LongTensor)
 
-        bs = len(img)
+        bs = len(voxels)
+
+        voxels = torch.mean(voxels, axis=1).float()
 
         with torch.no_grad():
-            img, target = img.to(device), target.to(device)
+            voxels, target = voxels.to(device), target.to(device)
 
-            pred = net(img)
+            pred = net(voxels)
 
             loss = criterion(pred, target)
 
@@ -241,7 +248,7 @@ batch_size = 256
 train_dl = torch.utils.data.DataLoader(train_set, batch_size=batch_size, num_workers=8, shuffle=True)
 val_dl = torch.utils.data.DataLoader(val_set, batch_size=batch_size, num_workers=8, shuffle=False)
 
-net = ResNet18(num_classes=10)
+net = BrainNetwork()
 device = 'cuda:0'
 
 net = net.to(device)
@@ -269,9 +276,11 @@ for e in range(200):
         best_acc = val_acc
         state = {'net': net.state_dict()}
         print('save checkpoint: best acc: %.2f'% best_acc)
-        torch.save(state, os.path.join('/fsx/proj-medarc/fmri/natural-scenes-dataset/log', 'baseline1_best.pt'))
+        torch.save(state, os.path.join('/fsx/proj-medarc/fmri/natural-scenes-dataset/log', 'baseline2_best.pt'))
 
     wandb.log({"train_acc": train_acc, "train_loss": train_loss, "val_acc":val_acc, "val_loss": val_loss, "lr":optimizer.param_groups[0]['lr']})
     scheduler.step()
 
 wandb.finish()
+
+# 77.73

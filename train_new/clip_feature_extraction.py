@@ -8,6 +8,7 @@ from main import DatasetfMRI
 from torchvision import transforms
 
 root_dir = '/fsx/proj-medarc/fmri/natural-scenes-dataset/data_untar/train'
+root_dir = '/fsx/proj-medarc/fmri/natural-scenes-dataset/data_untar/test'
 
 outdir = '/fsx/proj-medarc/fmri/natural-scenes-dataset/clipfeat/'
 
@@ -21,6 +22,8 @@ for f in onlyfiles:
     a = f.split('.')[0]
     if a not in files:
         files.append(a)
+
+print(len(files))
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(device)
@@ -85,7 +88,7 @@ for i, (img, _, _, fname) in enumerate(train_dl):
     t0 = time.time()
     # break
 
-with open(os.path.join(outdir, 'clip_feat.pickle'), 'wb') as handle:
+with open(os.path.join(outdir, 'clip_feat_test.pickle'), 'wb') as handle:
     pickle.dump(feat_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     # print("Label probs:", probs)  # prints: [[0.9927937  0.00421068 0.00299572]]
